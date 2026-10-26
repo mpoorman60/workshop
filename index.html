@@ -1,0 +1,357 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Workshop</title>
+<meta name="theme-color" content="#0b1220">
+<link rel="manifest" href="manifest.json">
+<link rel="icon" href="icon.svg">
+<style>
+  :root { --bg:#0b1220; --panel:#121b2e; --line:#23314f; --text:#e6f1ff; --dim:#8aa0c2; --accent:#3fd6ff; --accent2:#7cffb2; }
+  * { box-sizing:border-box; }
+  html,body { margin:0; height:100%; background:var(--bg); color:var(--text); font-family:system-ui,-apple-system,Segoe UI,Roboto,sans-serif; }
+  #app { position:fixed; inset:0; }
+  canvas { display:block; }
+  .ui { position:fixed; z-index:2; }
+  #hub { inset:0; display:flex; flex-direction:column; align-items:center; justify-content:center; gap:22px; padding:24px; background:radial-gradient(ellipse at top, #16244a 0%, var(--bg) 70%); overflow:auto; }
+  #hub h1 { margin:0; font-size:44px; letter-spacing:4px; font-weight:800; }
+  #hub h1 span { color:var(--accent); }
+  #hub p.sub { margin:0; color:var(--dim); }
+  .cards { display:grid; grid-template-columns:repeat(auto-fit,minmax(240px,1fr)); gap:16px; width:min(820px,100%); }
+  .card { background:var(--panel); border:1px solid var(--line); border-radius:16px; padding:20px; cursor:pointer; transition:border-color .15s, transform .15s; }
+  .card:hover { border-color:var(--accent); transform:translateY(-2px); }
+  .card h2 { margin:0 0 6px; font-size:20px; }
+  .card p { margin:0; color:var(--dim); font-size:14px; line-height:1.4; }
+  .card .tag { display:inline-block; margin-top:12px; font-size:12px; padding:3px 9px; border-radius:99px; background:#0f3a2a; color:var(--accent2); }
+  .card.soon { opacity:.5; cursor:default; }
+  .card.soon .tag { background:#2a2f3d; color:var(--dim); }
+  #bar { top:12px; left:12px; right:12px; display:none; gap:10px; align-items:center; flex-wrap:wrap; }
+  button { font:inherit; font-weight:600; background:var(--panel); color:var(--text); border:1px solid var(--line); border-radius:10px; padding:10px 16px; cursor:pointer; }
+  button.primary { background:var(--accent); color:#04121a; border-color:var(--accent); }
+  #spread { display:flex; align-items:center; gap:8px; background:var(--panel); border:1px solid var(--line); border-radius:10px; padding:8px 12px; }
+  #help { bottom:12px; left:12px; right:12px; display:none; text-align:center; color:var(--dim); font-size:14px; }
+</style>
+<script type="importmap">
+{ "imports": {
+  "three": "https://cdn.jsdelivr.net/npm/three@0.160.0/build/three.module.js",
+  "three/addons/": "https://cdn.jsdelivr.net/npm/three@0.160.0/examples/jsm/"
+} }
+</script>
+</head>
+<body>
+<div id="app"></div>
+
+<div id="hub" class="ui">
+  <h1>WORK<span>SHOP</span></h1>
+  <p class="sub">Pull things apart. Learn what's inside.</p>
+  <div class="cards" id="cards"></div>
+</div>
+
+<div id="bar" class="ui">
+  <button id="back">◀ Hub</button>
+  <button id="enter" class="primary">Enter Headset</button>
+  <div id="spread"><span>Spread</span><input id="slider" type="range" min="0" max="1" step="0.01" value="0"></div>
+  <button id="reset">Put back together</button>
+</div>
+<div id="help" class="ui">Click a part to learn about it. Drag to look around. Use the slider to pull it apart.</div>
+
+<script type="module">
+import * as THREE from 'three';
+import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
+
+/* ---------------- Projects (the hub) ----------------
+   To add a new project later, add an entry here with a build() function
+   that returns { group, parts }. */
+const PROJECTS = [
+  { id:'pc', name:'PC Teardown', desc:'A basic everyday desktop PC. Every part, wire and screw.', build: buildPC },
+  { id:'soon1', name:'More coming soon', desc:'New things to pull apart will show up here.', soon:true },
+];
+
+/* ---------------- Scene ---------------- */
+const renderer = new THREE.WebGLRenderer({ antialias:true, alpha:true });
+renderer.setPixelRatio(Math.min(devicePixelRatio, 2));
+renderer.setSize(innerWidth, innerHeight);
+renderer.xr.enabled = true;
+document.getElementById('app').appendChild(renderer.domElement);
+
+const scene = new THREE.Scene();
+const camera = new THREE.PerspectiveCamera(50, innerWidth/innerHeight, 0.01, 50);
+camera.position.set(0.9, 1.4, 1.1);
+const controls = new OrbitControls(camera, renderer.domElement);
+controls.target.set(0, 1.1, 0);
+controls.enableDamping = true;
+
+scene.add(new THREE.HemisphereLight(0xbfe9ff, 0x1a2238, 1.2));
+const sun = new THREE.DirectionalLight(0xffffff, 1.4); sun.position.set(1, 2, 1.5); scene.add(sun);
+
+const desktopBg = new THREE.Color(0x0b1220);
+scene.background = desktopBg;
+const grid = new THREE.GridHelper(4, 40, 0x23314f, 0x16203a); scene.add(grid);
+
+let current = null;       // { group, parts }
+let explode = 0;          // 0..1
+let selected = null;
+
+/* ---------------- Hologram helpers ---------------- */
+function holoMat(color, opacity=0.85){
+  return new THREE.MeshStandardMaterial({ color, emissive:color, emissiveIntensity:0.25, roughness:0.5, metalness:0.2, transparent:true, opacity });
+}
+function addEdges(mesh, color=0x9ff3ff){
+  const e = new THREE.LineSegments(new THREE.EdgesGeometry(mesh.geometry, 25), new THREE.LineBasicMaterial({ color, transparent:true, opacity:0.6 }));
+  mesh.add(e); return mesh;
+}
+function box(w,h,d,color,opacity){ return addEdges(new THREE.Mesh(new THREE.BoxGeometry(w,h,d), holoMat(color,opacity))); }
+function fan(size,color){
+  const g = new THREE.Group();
+  const frame = new THREE.Mesh(new THREE.BoxGeometry(size,size,0.025), holoMat(color,0.25)); addEdges(frame); g.add(frame);
+  const ring = new THREE.Mesh(new THREE.TorusGeometry(size*0.42, 0.004, 8, 40), holoMat(color,0.9)); g.add(ring);
+  const hub = new THREE.Mesh(new THREE.CylinderGeometry(size*0.14,size*0.14,0.02,24), holoMat(color,0.9)); hub.rotation.x=Math.PI/2; g.add(hub);
+  for(let i=0;i<7;i++){ const b=new THREE.Mesh(new THREE.BoxGeometry(size*0.28,0.012,0.003), holoMat(color,0.8)); b.position.set(Math.cos(i/7*Math.PI*2)*size*0.27, Math.sin(i/7*Math.PI*2)*size*0.27,0); b.rotation.z=i/7*Math.PI*2+0.4; g.add(b); }
+  return g;
+}
+function cable(points, color, r=0.006){
+  const curve = new THREE.CatmullRomCurve3(points.map(p=>new THREE.Vector3(...p)));
+  return new THREE.Mesh(new THREE.TubeGeometry(curve, 40, r, 8, false), holoMat(color,0.95));
+}
+function screw(){
+  const g = new THREE.Group();
+  const head = new THREE.Mesh(new THREE.CylinderGeometry(0.0045,0.0045,0.002,12), holoMat(0xd8dde6,1)); g.add(head);
+  const shaft = new THREE.Mesh(new THREE.CylinderGeometry(0.0018,0.0018,0.008,8), holoMat(0xaab2bf,1)); shaft.position.y=-0.005; g.add(shaft);
+  return g;
+}
+
+/* ---------------- PC model ----------------
+   Units are meters. x = side (open side is +x), y = up, z = front. */
+function buildPC(){
+  const group = new THREE.Group();
+  const parts = [];
+  function part(obj, pos, dir, info, rot){
+    obj.position.set(...pos);
+    if(rot) obj.rotation.set(...rot);
+    const p = { obj, base:obj.position.clone(), dir:new THREE.Vector3(...dir), ...info };
+    obj.traverse(o=>{ o.userData.part = p; });
+    group.add(obj); parts.push(p); return p;
+  }
+
+  part(box(0.20,0.45,0.42,0x5c6b8a,0.12), [0,0,0], [0,0,0], { name:'Case', what:'The metal box that holds everything and keeps dust out.', tip:'Good airflow (fans in front, out the back) keeps parts cool.' });
+  part(box(0.004,0.43,0.40,0x9fe3ff,0.10), [0.102,0,0], [0.5,0,0], { name:'Side Panel', what:'The removable side, often glass, so you can see inside.', tip:'Usually held on by 2-4 thumbscrews at the back.' });
+  part(box(0.004,0.30,0.244,0x2f8f5b,0.9), [-0.088,0.05,0.02], [-0.12,0,0], { name:'Motherboard', what:'The main circuit board. Every other part plugs into it.', tip:'Sits on small metal posts called standoffs so it never touches the case.' });
+  part(box(0.004,0.04,0.04,0xc9a24a,1), [-0.084,0.12,0.0], [0.28,0.05,0], { name:'CPU (Processor)', what:'The brain. It runs your programs and does the math.', tip:'Handle by the edges, and match the gold triangle to the socket.' });
+  part(box(0.08,0.12,0.12,0x8a96aa,0.8), [-0.04,0.12,0.0], [0.48,0.1,0], { name:'CPU Cooler', what:'Pulls heat off the CPU with metal fins and a fan.', tip:'Needs a thin layer of thermal paste between it and the CPU.' });
+  part(box(0.03,0.133,0.006,0x3b5bdb,0.95), [-0.07,0.12,-0.085], [0.32,0,-0.12], { name:'RAM Stick 1', what:'Short-term memory. Holds what you are working on right now.', tip:'Push straight down until both clips snap shut.' }, [0,0,0]);
+  part(box(0.03,0.133,0.006,0x3b5bdb,0.95), [-0.07,0.12,-0.098], [0.32,0,-0.2], { name:'RAM Stick 2', what:'A second memory stick. Two sticks run faster than one.', tip:'Check the manual for which slots to use (often 2 and 4).' });
+  part(box(0.11,0.04,0.27,0x444c5e,0.95), [-0.03,-0.035,0.04], [0.42,-0.08,0.05], { name:'Graphics Card (GPU)', what:'Draws everything you see. Does the heavy work for games and VR.', tip:'Plugs into the long top slot and is screwed to the back of the case.' });
+  part(box(0.004,0.022,0.08,0x2b2b2b,1), [-0.084,0.03,0.07], [0.3,0.12,0.05], { name:'M.2 SSD', what:'Super fast storage stick. Usually holds Windows and your games.', tip:'Held down by one tiny screw at the end.' });
+  part(box(0.15,0.086,0.14,0x2d3442,0.9), [0,-0.175,-0.13], [0,-0.25,-0.2], { name:'Power Supply (PSU)', what:'Turns wall power into the safe power each part needs.', tip:'Never open a PSU. It can hold a shock even when unplugged.' });
+  part(box(0.10,0.026,0.147,0x7d8796,0.9), [0,-0.17,0.12], [0,-0.25,0.25], { name:'Hard Drive (HDD)', what:'Big, slower storage for photos, videos and backups.', tip:'Spinning drives do not like being bumped while running.' });
+  part(fan(0.12,0x3fd6ff), [0,0.1,0.198], [0,0.05,0.3], { name:'Front Fan (top)', what:'Pulls cool air in from the front.', tip:'The arrows on the side show which way air blows.' });
+  part(fan(0.12,0x3fd6ff), [0,-0.03,0.198], [0,-0.05,0.3], { name:'Front Fan (bottom)', what:'Another intake fan, feeding air to the graphics card.', tip:'Dust filters on intakes keep the inside clean.' });
+  part(fan(0.12,0xff8f5a), [0,0.13,-0.198], [0,0.05,-0.3], { name:'Rear Fan', what:'Pushes hot air out the back.', tip:'Front in, back out is the classic airflow setup.' });
+
+  // Cables (from the PSU)
+  part(cable([[-0.05,-0.14,-0.08],[0.02,-0.1,0.05],[0.0,0.05,0.13],[-0.08,0.1,0.14]],0xf0c040,0.009), [0,0,0], [0.18,0,0.05], { name:'24-pin Power Cable', what:'The main power line from the PSU to the motherboard.', tip:'The biggest plug in the PC. Push until the clip clicks.' });
+  part(cable([[-0.05,-0.14,-0.18],[-0.06,0.05,-0.19],[-0.07,0.19,-0.12],[-0.082,0.19,-0.06]],0xff6b6b,0.006), [0,0,0], [0.16,0.1,-0.05], { name:'8-pin CPU Power Cable', what:'Extra power just for the CPU.', tip:'Runs up the back to the top-left corner of the motherboard.' });
+  part(cable([[0.03,-0.14,-0.08],[0.04,-0.09,0.05],[0.03,-0.06,0.16]],0xb57cff,0.007), [0,0,0], [0.22,-0.05,0.08], { name:'PCIe Power Cable', what:'Feeds extra power to the graphics card.', tip:'Big GPUs may need two or three of these.' });
+  part(cable([[0.05,-0.15,-0.06],[0.06,-0.16,0.04],[0.04,-0.16,0.06]],0x7cffb2,0.004), [0,0,0], [0.15,-0.1,0.15], { name:'SATA Cables', what:'Power and data for the hard drive.', tip:'L-shaped plugs only go in one way.' });
+
+  // Screws: motherboard standoffs and PSU mounting
+  const mbScrews = [[0.15,-0.08],[0.15,0.12],[-0.08,-0.08],[-0.08,0.12]];
+  mbScrews.forEach(([y,z],i)=> part(screw(), [-0.082,y+0.05-0.05,z], [0.4,0,0], { name:'Motherboard Screw', what:'Holds the motherboard onto its standoffs.', tip:'Snug, not tight. Over-tightening can crack the board.' }, [0,0,-Math.PI/2]));
+  [[0.04,-0.15],[-0.04,-0.15],[0.04,-0.2],[-0.04,-0.2]].forEach(([x,y])=> part(screw(), [x,y,-0.212], [0,0,-0.45], { name:'PSU Screw', what:'Holds the power supply to the back of the case.', tip:'Usually 4 screws on the outside back panel.' }, [Math.PI/2,0,0]));
+  part(screw(), [-0.03,-0.03,-0.212], [0.3,0,-0.45], { name:'GPU Screw', what:'Holds the graphics card bracket to the case.', tip:'Remove this before pulling the GPU out.' }, [Math.PI/2,0,0]);
+
+  return { group, parts };
+}
+
+/* ---------------- Info panel (a floating card) ---------------- */
+const infoCanvas = document.createElement('canvas'); infoCanvas.width=1024; infoCanvas.height=420;
+const infoTex = new THREE.CanvasTexture(infoCanvas); infoTex.colorSpace = THREE.SRGBColorSpace;
+const infoPanel = new THREE.Mesh(new THREE.PlaneGeometry(0.42,0.172), new THREE.MeshBasicMaterial({ map:infoTex, transparent:true, depthTest:false }));
+infoPanel.renderOrder = 10; infoPanel.visible=false; scene.add(infoPanel);
+function wrap(ctx,text,x,y,maxW,lh){ let line=''; for(const w of text.split(' ')){ const t=line+w+' '; if(ctx.measureText(t).width>maxW && line){ ctx.fillText(line,x,y); line=w+' '; y+=lh; } else line=t; } ctx.fillText(line,x,y); return y+lh; }
+function drawInfo(p){
+  const c=infoCanvas.getContext('2d'); c.clearRect(0,0,1024,420);
+  c.fillStyle='rgba(10,20,40,0.88)'; c.strokeStyle='#3fd6ff'; c.lineWidth=6;
+  c.beginPath(); c.roundRect(6,6,1012,408,36); c.fill(); c.stroke();
+  c.fillStyle='#3fd6ff'; c.font='bold 64px system-ui,sans-serif'; c.fillText(p.name,44,92);
+  c.fillStyle='#e6f1ff'; c.font='40px system-ui,sans-serif'; let y=wrap(c,p.what,44,160,936,50);
+  c.fillStyle='#7cffb2'; c.font='italic 36px system-ui,sans-serif'; wrap(c,'Tip: '+p.tip,44,y+14,936,46);
+  infoTex.needsUpdate=true;
+}
+
+function setSelected(p){
+  if(selected) setGlow(selected,0.25);
+  selected = (selected===p) ? null : p;
+  if(selected){ setGlow(selected,1.2); drawInfo(selected); }
+  infoPanel.visible = !!selected;
+}
+function setGlow(p,v){ p.obj.traverse(o=>{ if(o.material && o.material.emissiveIntensity!==undefined) o.material.emissiveIntensity=v; }); }
+
+function applyExplode(){
+  if(!current) return;
+  for(const p of current.parts) p.obj.position.copy(p.base).addScaledVector(p.dir, explode);
+  document.getElementById('slider').value = explode;
+}
+
+/* ---------------- Hub screens ---------------- */
+const cardsEl = document.getElementById('cards');
+for(const pr of PROJECTS){
+  const el=document.createElement('div'); el.className='card'+(pr.soon?' soon':'');
+  el.innerHTML=`<h2>${pr.name}</h2><p>${pr.desc}</p><span class="tag">${pr.soon?'Soon':'Ready'}</span>`;
+  if(!pr.soon) el.onclick=()=>openProject(pr);
+  cardsEl.appendChild(el);
+}
+function openProject(pr){
+  if(current) scene.remove(current.group);
+  current = pr.build();
+  current.group.position.set(0,1.1,0);
+  scene.add(current.group);
+  explode=0; selected=null; infoPanel.visible=false; applyExplode();
+  document.getElementById('hub').style.display='none';
+  document.getElementById('bar').style.display='flex';
+  document.getElementById('help').style.display='block';
+}
+document.getElementById('back').onclick=()=>{
+  document.getElementById('hub').style.display='flex';
+  document.getElementById('bar').style.display='none';
+  document.getElementById('help').style.display='none';
+};
+document.getElementById('slider').oninput=e=>{ explode=+e.target.value; applyExplode(); };
+document.getElementById('reset').onclick=()=>{ explode=0; applyExplode(); };
+
+/* Mouse click to select (desktop preview) */
+const ray = new THREE.Raycaster(); const mouse = new THREE.Vector2(); let downAt=null;
+renderer.domElement.addEventListener('pointerdown',e=>downAt=[e.clientX,e.clientY]);
+renderer.domElement.addEventListener('pointerup',e=>{
+  if(!downAt || Math.hypot(e.clientX-downAt[0],e.clientY-downAt[1])>5 || !current) return;
+  mouse.set(e.clientX/innerWidth*2-1, -e.clientY/innerHeight*2+1);
+  ray.setFromCamera(mouse,camera);
+  const p = pickByRay(ray); if(p) setSelected(p);
+});
+function pickByRay(r){
+  const hits = r.intersectObjects(current.group.children,true);
+  // skip the see-through case and side panel unless nothing else is hit
+  const real = hits.find(h=>{ const n=h.object.userData.part?.name; return n && n!=='Case' && n!=='Side Panel'; });
+  return (real || hits.find(h=>h.object.userData.part))?.object.userData.part || null;
+}
+
+/* ---------------- Headset (WebXR) ---------------- */
+const enterBtn = document.getElementById('enter');
+let xrMode = null;
+(async()=>{
+  if(!navigator.xr){ enterBtn.textContent='Headset not found'; enterBtn.disabled=true; return; }
+  if(await navigator.xr.isSessionSupported('immersive-ar')) xrMode='immersive-ar';
+  else if(await navigator.xr.isSessionSupported('immersive-vr')) xrMode='immersive-vr';
+  if(!xrMode){ enterBtn.textContent='Headset not found'; enterBtn.disabled=true; }
+})();
+enterBtn.onclick = async()=>{
+  const session = await navigator.xr.requestSession(xrMode,{ optionalFeatures:['local-floor','hand-tracking'] });
+  renderer.xr.setReferenceSpaceType('local-floor');
+  await renderer.xr.setSession(session);
+  scene.background = null; grid.visible=false;   // see your real room (passthrough)
+  // put the hologram in front of you at table height
+  current.group.position.set(0,1.0,-0.6);
+  session.addEventListener('end',()=>{ scene.background=desktopBg; grid.visible=true; current.group.position.set(0,1.1,0); });
+};
+
+// Per-hand state
+const hands = { left:{}, right:{} };
+const tmpA=new THREE.Vector3(), tmpB=new THREE.Vector3(), tmpQ=new THREE.Quaternion();
+let spreadStart=null, moveState=null;
+
+function readInputs(frame, refSpace){
+  const out=[];
+  for(const src of frame.session.inputSources){
+    const h = hands[src.handedness]; if(!h) continue;
+    let pressed=false, pos=new THREE.Vector3(), origin=new THREE.Vector3(), dir=new THREE.Vector3(0,0,-1), isHand=false;
+    if(src.hand){
+      isHand=true;
+      const t=frame.getJointPose(src.hand.get('thumb-tip'),refSpace), i=frame.getJointPose(src.hand.get('index-finger-tip'),refSpace);
+      if(!t||!i) continue;
+      tmpA.set(t.transform.position.x,t.transform.position.y,t.transform.position.z);
+      tmpB.set(i.transform.position.x,i.transform.position.y,i.transform.position.z);
+      const d=tmpA.distanceTo(tmpB);
+      pressed = h.pressed ? d<0.035 : d<0.02;      // pinch, with a little "sticky" so it doesn't flicker
+      pos.addVectors(tmpA,tmpB).multiplyScalar(0.5);
+    } else if(src.gamepad){
+      const g=frame.getPose(src.gripSpace||src.targetRaySpace,refSpace); const r=frame.getPose(src.targetRaySpace,refSpace);
+      if(!g||!r) continue;
+      const b=src.gamepad.buttons; pressed = !!((b[0]&&b[0].pressed)||(b[1]&&b[1].pressed));
+      pos.set(g.transform.position.x,g.transform.position.y,g.transform.position.z);
+      origin.set(r.transform.position.x,r.transform.position.y,r.transform.position.z);
+      const o=r.transform.orientation; tmpQ.set(o.x,o.y,o.z,o.w); dir.set(0,0,-1).applyQuaternion(tmpQ);
+    } else continue;
+    const justPressed = pressed && !h.pressed; h.pressed=pressed;
+    out.push({ side:src.handedness, pressed, justPressed, pos, origin, dir, isHand });
+  }
+  return out;
+}
+
+function nearestPart(pos){
+  let best=null, bestD=0.07;
+  const box=new THREE.Box3();
+  for(const p of current.parts){
+    if(p.name==='Case' || p.name==='Side Panel') continue;
+    box.setFromObject(p.obj); const d=box.distanceToPoint(pos);
+    if(d<bestD){ bestD=d; best=p; }
+  }
+  return best;
+}
+
+function handleXR(){
+  const frame = renderer.xr.getFrame(); const refSpace = renderer.xr.getReferenceSpace();
+  if(!frame || !refSpace || !current) return;
+  const ins = readInputs(frame, refSpace);
+  const down = ins.filter(i=>i.pressed);
+
+  if(down.length===2){
+    // Two hands: pull apart to spread, push together to rebuild
+    const d = down[0].pos.distanceTo(down[1].pos);
+    if(!spreadStart) spreadStart={ d, e:explode };
+    explode = THREE.MathUtils.clamp(spreadStart.e + (d-spreadStart.d)*2.2, 0, 1);
+    applyExplode(); moveState=null; return;
+  }
+  spreadStart=null;
+
+  if(down.length===1){
+    const i=down[0];
+    if(i.justPressed){
+      let p=null;
+      if(i.isHand) p=nearestPart(i.pos);
+      else { ray.set(i.origin,i.dir); p=pickByRay(ray); }
+      if(p && !(p.name==='Case')) { setSelected(p); moveState=null; }
+      else {
+        // grabbed empty space near the model: carry it around
+        const near = i.isHand ? i.pos.distanceTo(current.group.position)<0.4 : (ray.set(i.origin,i.dir), ray.intersectObjects(current.group.children,true).length>0);
+        if(near){
+          const grabDist = i.isHand ? 0 : i.origin.distanceTo(current.group.position);
+          const point = i.isHand ? i.pos.clone() : i.origin.clone().addScaledVector(i.dir,grabDist);
+          moveState={ side:i.side, grabDist, offset: current.group.position.clone().sub(point) };
+        }
+      }
+    }
+    if(moveState && moveState.side===i.side){
+      const point = i.isHand ? i.pos : i.origin.clone().addScaledVector(i.dir,moveState.grabDist);
+      current.group.position.copy(point).add(moveState.offset);
+    }
+  } else moveState=null;
+}
+
+/* ---------------- Loop ---------------- */
+renderer.setAnimationLoop(()=>{
+  if(renderer.xr.isPresenting) handleXR(); else controls.update();
+  if(infoPanel.visible && current){
+    const cam = renderer.xr.isPresenting ? renderer.xr.getCamera() : camera;
+    const top = new THREE.Box3().setFromObject(current.group).max.y;
+    infoPanel.position.set(current.group.position.x, top+0.13, current.group.position.z);
+    infoPanel.lookAt(cam.getWorldPosition(tmpA));
+  }
+  renderer.render(scene,camera);
+});
+addEventListener('resize',()=>{ camera.aspect=innerWidth/innerHeight; camera.updateProjectionMatrix(); renderer.setSize(innerWidth,innerHeight); });
+
+if('serviceWorker' in navigator) navigator.serviceWorker.register('sw.js').catch(()=>{});
+</script>
+</body>
+</html>
